@@ -9,15 +9,41 @@ class Servidor:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(('', porta))
         s.listen(5)
+        self.conexoes = {}  # Dicionário para mapear apelidos para conexões
+        self.canais = {}  # Dicionário para mapear nomes de canais para membros
+
+    def obter_conexao_por_nick(self, nick):
+        for conexao in self.conexoes.values():
+            if conexao.nickid.upper() == nick.upper():
+                return conexao
+        return None
+
+    def sair_do_canal(self, conexao, canal):
+        if canal.upper() in self.canais:
+            if conexao.nickid in self.canais[canal.upper()]:
+                del self.canais[canal.upper()][conexao.nickid]
+                conexao.canais.remove(canal.upper())
+                for membro_conexao in self.canais[canal.upper()].values():
+                    membro_conexao.enviar(b':' + conexao.nickid + b' PART ' + canal + b'\r\n')
+                if len(self.canais[canal.upper()]) == 0:
+                    del self.canais[canal.upper()]
+
+    def enviar_para_canal(self, remetente, canal, mensagem):
+        if canal.upper() in self.canais:
+            for membro_conexao in self.canais[canal.upper()].values():
+                if membro_conexao != remetente:
+                    membro_conexao.enviar(b':' + remetente.nickid + b' PRIVMSG ' + canal + b' :' + mensagem + b'\r\n')
 
     def registrar_monitor_de_conexoes_aceitas(self, callback):
-        asyncio.get_event_loop().add_reader(self.s, lambda: callback(Conexao(self.s.accept())))
-
+        asyncio.get_event_loop().add_reader(self.s, lambda: callback(Conexao(self.s.accept(), self)))
 
 class Conexao:
-    def __init__(self, accept_tuple):
+    def __init__(self, accept_tuple, servidor):
         self.s, _ = accept_tuple
-        self.dados_residuais = b""  # Armazena os dados residuais
+        self.dados_residuais = b""
+        self.nickid = b"*"  # Apelido inicial
+        self.servidor = servidor
+        self.canais = []
 
     def registrar_recebedor(self, callback):
         asyncio.get_event_loop().add_reader(self.s, lambda: callback(self, self.s.recv(8192)))
@@ -32,23 +58,79 @@ class Conexao:
 def validar_nome(nome):
     return re.match(br'^[a-zA-Z][a-zA-Z0-9_-]*$', nome) is not None
 
-
 def sair(conexao):
     print(conexao, 'conexão fechada')
+    for canal in conexao.canais:
+        conexao.servidor.sair_do_canal(conexao, canal)
     conexao.fechar()
 
-
 def dados_recebidos(conexao, dados):
-    if dados == b'':
-        return sair(conexao)
-    conexao.enviar(b':server PONG server :' + dados.split)
-    print(conexao, dados)
+    dados = conexao.dados_residuais + dados
+    conexao.dados_residuais = b""
 
+    if not dados.endswith(b"\r\n"):
+        dados = list(filter((b"").__ne__, dados.split(b"\r\n")))
+        conexao.dados_residuais += dados.pop(-1)
+    else:
+        dados = list(filter((b"").__ne__, dados.split(b"\r\n")))
+
+    if dados:
+        for message in dados:
+            request, text = message.split(b" ", 1)
+
+            # Passo 1: tratando mensagens do tipo 'PING'
+            if request.upper() == b"PING":
+                conexao.enviar(b":server PONG server :" + text + b"\r\n")
+
+            # Passo 2,3 e 4: tratando mensagens do tipo 'NICK'
+            elif request.upper() == b"NICK":
+                nickname = text.strip()
+                if validar_nome(nickname):
+                    if nickname.upper() in [conn.nickid.upper() for conn in conexao.servidor.conexoes.values()]:
+                        conexao.enviar(b":server 433 " + conexao.nickid + b" " + nickname + b" :Nickname is already in use\r\n")
+                    else:
+                        if conexao.nickid == b"*":
+                            conexao.enviar(b":server 001 " + nickname + b" :Welcome\r\n")
+                            conexao.enviar(b":server 422 " + nickname + b" :MOTD File is missing\r\n")
+                            conexao.nickid = nickname
+                            conexao.servidor.conexoes[nickname] = conexao
+                        else:
+                            old_nickname = conexao.nickid
+                            conexao.enviar(b":" + old_nickname + b" NICK " + nickname + b"\r\n")
+                            conexao.nickid = nickname
+                            del conexao.servidor.conexoes[old_nickname]
+                            conexao.servidor.conexoes[nickname] = conexao
+                else:
+                    conexao.enviar(b":server 432 " + conexao.nickid + b" " + nickname + b" :Erroneous nickname\r\n")
+
+            
+            # Passo 5: tratando mensagens do tipo PRIVMSG
+            elif request.upper() == b'PRIVMSG':
+                destinatario, conteudo = text.split(b' ', 1)
+                if destinatario.startswith(b'#') and validar_nome(destinatario[1:]):
+                    canal = destinatario[1:].upper()
+                    if canal in conexao.servidor.canais:
+                        conexao.servidor.enviar_para_canal(conexao, canal, conteudo)
+                else:
+                    dest_conexao = conexao.servidor.obter_conexao_por_nick(destinatario)
+                    if dest_conexao:
+                        dest_conexao.enviar(b':' + conexao.nickid + b' PRIVMSG ' + dest_conexao.nickid + b' :' + conteudo + b'\r\n')
+
+            # Passo 6: tratando mensagens do tipo 'JOIN'
+            elif request.upper() == b'JOIN':
+                if text.startswith(b'#') and validar_nome(text[1:]):
+                    canal = text.upper()
+                    if canal not in conexao.canais:
+                        conexao.canais.append(canal)
+                        if canal not in conexao.servidor.canais:
+                            conexao.servidor.canais[canal] = {}
+                        conexao.servidor.canais[canal][conexao.nickid] = conexao
+                        for membro_conexao in conexao.servidor.canais[canal].values():
+                            membro_conexao.enviar(b':' + conexao.nickid + b' JOIN :' + text + b'\r\n')
 
 def conexao_aceita(conexao):
     print(conexao, 'nova conexão')
     conexao.registrar_recebedor(dados_recebidos)
-
 
 servidor = Servidor(6667)
 servidor.registrar_monitor_de_conexoes_aceitas(conexao_aceita)
