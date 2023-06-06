@@ -18,22 +18,6 @@ class Servidor:
                 return conexao
         return None
 
-    def sair_do_canal(self, conexao, canal):
-        if canal.upper() in self.canais:
-            if conexao.nickid in self.canais[canal.upper()]:
-                del self.canais[canal.upper()][conexao.nickid]
-                conexao.canais.remove(canal.upper())
-                for membro_conexao in self.canais[canal.upper()].values():
-                    membro_conexao.enviar(b':' + conexao.nickid + b' PART ' + canal + b'\r\n')
-                if len(self.canais[canal.upper()]) == 0:
-                    del self.canais[canal.upper()]
-
-    def enviar_para_canal(self, remetente, canal, mensagem):
-        if canal.upper() in self.canais:
-            for membro_conexao in self.canais[canal.upper()].values():
-                if membro_conexao != remetente:
-                    membro_conexao.enviar(b':' + remetente.nickid + b' PRIVMSG ' + canal + b' :' + mensagem + b'\r\n')
-
     def registrar_monitor_de_conexoes_aceitas(self, callback):
         asyncio.get_event_loop().add_reader(self.s, lambda: callback(Conexao(self.s.accept(), self)))
 
@@ -78,7 +62,7 @@ def dados_recebidos(conexao, dados):
         for message in dados:
             request, text = message.split(b" ", 1)
 
-            # Passo 1: tratando mensagens do tipo 'PING'
+            # Passo 1:mensagens do tipo 'PING'
             if request.upper() == b"PING":
                 conexao.enviar(b":server PONG server :" + text + b"\r\n")
 
@@ -103,30 +87,30 @@ def dados_recebidos(conexao, dados):
                 else:
                     conexao.enviar(b":server 432 " + conexao.nickid + b" " + nickname + b" :Erroneous nickname\r\n")
 
-            
             # Passo 5: tratando mensagens do tipo PRIVMSG
             elif request.upper() == b'PRIVMSG':
                 destinatario, conteudo = text.split(b' ', 1)
                 if destinatario.startswith(b'#') and validar_nome(destinatario[1:]):
-                    canal = destinatario[1:].upper()
-                    if canal in conexao.servidor.canais:
-                        conexao.servidor.enviar_para_canal(conexao, canal, conteudo)
+                    conexao.servidor.enviar_para_canal(conexao, destinatario, conteudo)
                 else:
                     dest_conexao = conexao.servidor.obter_conexao_por_nick(destinatario)
                     if dest_conexao:
-                        dest_conexao.enviar(b':' + conexao.nickid + b' PRIVMSG ' + dest_conexao.nickid + b' :' + conteudo + b'\r\n')
+                        dest_conexao.enviar(b':' + conexao.nickid + b' PRIVMSG ' + dest_conexao.nickid + b' ' + conteudo + b'\r\n')
 
             # Passo 6: tratando mensagens do tipo 'JOIN'
+           
             elif request.upper() == b'JOIN':
                 if text.startswith(b'#') and validar_nome(text[1:]):
-                    canal = text.upper()
-                    if canal not in conexao.canais:
-                        conexao.canais.append(canal)
-                        if canal not in conexao.servidor.canais:
-                            conexao.servidor.canais[canal] = {}
-                        conexao.servidor.canais[canal][conexao.nickid] = conexao
-                        for membro_conexao in conexao.servidor.canais[canal].values():
-                            membro_conexao.enviar(b':' + conexao.nickid + b' JOIN :' + text + b'\r\n')
+                    if text.upper() not in servidor.canais.keys():
+                        servidor.canais[text.upper()] = {}
+                    servidor.canais[text.upper()][conexao.nickid] = conexao 
+                    
+                    if text.upper() not in conexao.canais:
+                        conexao.canais.append(text.upper())
+                    membros = b''    
+                    
+                    for chave in servidor.canais[text.upper()]:
+                        servidor.canais[text.upper()][chave].enviar(b':' + conexao.nickid + b' JOIN :' + text + b'\r\n')
 
 def conexao_aceita(conexao):
     print(conexao, 'nova conexão')
