@@ -47,18 +47,9 @@ def validar_nome(nome):
 
 
 def sair(conexao):
-    print(conexao.nickid, 'conexão fechada')
-    if conexao.nickid in conexao.servidor.nicknames:
-        del conexao.servidor.nicknames[conexao.nickid.lower()]
+    print(conexao, 'conexão fechada')
     conexao.fechar()
-
-    for canal in conexao.canais:
-        if canal in conexao.servidor.canais:
-            for chave, conn in conexao.servidor.canais[canal].items():
-                if conn != conexao:
-                    if conn.s.fileno() != -1:  # Verifica se o descritor de arquivo está válido
-                        conn.enviar(b':' + conexao.nickid + b' QUIT :Connection closed\r\n')
-
+    
 
 def split_messages(data):
     return list(filter((b'').__ne__, data.split(b'\r\n')))
@@ -137,30 +128,18 @@ def process_join(conexao, message):
             conexao.servidor.canais[canal.upper()][chave].enviar(b':' + conexao.nickid + b' JOIN :' + canal + b'\r\n')
             membros += conexao.servidor.canais[canal.upper()][chave].nickid + b' '
 
-        membros = membros.strip()
-        chunk_size = 512 - len(conexao.nickid) - len(canal) - 24  # 24 = len(':server 353 apelido = canal :')
-
-        while len(membros) > chunk_size:
-            chunk = membros[:chunk_size]
-            conexao.enviar(b':server 353 ' + conexao.nickid + b' = ' + canal + b' :' + chunk + b'\r\n')
-            membros = membros[chunk_size:]
-
-        conexao.enviar(b':server 353 ' + conexao.nickid + b' = ' + canal + b' :' + membros + b'\r\n')
-        conexao.enviar(b':server 366 ' + conexao.nickid + b' ' + canal + b' :End of /NAMES list.\r\n')
-
-                # Step 9: Sending a list of members to all members in the channel
-        for chave in conexao.servidor.canais[canal.upper()]:
-            if conexao.servidor.canais[canal.upper()][chave] != conexao:
-                conexao.servidor.canais[canal.upper()][chave].enviar(b':' + conexao.nickid + b' JOIN :' + canal + b'\r\n')
-                temp_members = b''
-                for member_chave in conexao.servidor.canais[canal.upper()]:
-                    temp_members += conexao.servidor.canais[canal.upper()][member_chave].nickid + b' '
-                conexao.servidor.canais[canal.upper()][chave].enviar(b':server 353 ' + conexao.servidor.canais[canal.upper()][chave].nickid + b' = ' + canal + b' :' + temp_members + b'\r\n')
-                conexao.servidor.canais[canal.upper()][chave].enviar(b':server 366 ' + conexao.servidor.canais[canal.upper()][chave].nickid + b' ' + canal + b' :End of /NAMES list.\r\n')
+        for chave in sorted(servidor.canais[canal.upper()].keys()): 
+            membros += chave + b' '
+        send = b':server 353 ' + conexao.nickid + b' = ' + canal + b' :' + membros
+        while len(send) > 510:
+            restante = send[:510]
+            conexao.enviar(send + b'\r\n')
+            send = restante
+                        
+        conexao.enviar(send + b'\r\n' + b':server 366 ' + conexao.nickid + b' ' + canal + b' :End of /NAMES list.\r\n')
+         
     else:
         conexao.enviar(b':server 403 ' + canal + b' :No such channel.\r\n')
-
-        
 
 def process_part(conexao, message):
     request, canal = message.split(b' ', 1)
@@ -177,38 +156,19 @@ def process_part(conexao, message):
     else:
         conexao.enviar(b':server 403 ' + canal + b' :No such channel.\r\n')
 
-def process_quit(conexao):
-    temp_list = []
-    for canal in conexao.canais:
-        if canal in conexao.servidor.canais:
-            for chave in conexao.servidor.canais[canal]:
-                temp_list.append(conexao.servidor.canais[canal][chave])
-    temp_list = list(dict.fromkeys(temp_list))
-
-    for item in temp_list:
-        if item.s.fileno() != -1:
-            item.enviar(b':' + conexao.nickid + b' QUIT :Connection closed\r\n')
-        item.fechar()
-        conexao.servidor.remover_conexao(item)
-
-    conexao.servidor.remover_conexao(conexao)
-
 def dados_recebidos(conexao, dados):
     dados = conexao.dados_residuais + dados
     conexao.dados_residuais = b''
 
+
     if dados == b'':
-        return sair(conexao)
-    
-     # Passos 8 e 10: mensagens QUIT
-    if dados == b'':
-        temp_list = []  # Criando lista de envios de mensagens
+        temp_list = []  
         for canal in conexao.canais:
             servidor.canais[canal].pop(conexao.nickid, None)
             for chave in servidor.canais[canal]:
                  temp_list.append(servidor.canais[canal][chave])
-        temp_list = list(dict.fromkeys(temp_list)) # Duplicados
-        for item in temp_list: # Envia sinal QUIT e remove a pessoa que esta saindo da conexão
+        temp_list = list(dict.fromkeys(temp_list)) 
+        for item in temp_list: 
                 item.enviar(b':' + conexao.nickid + b' QUIT :Connection closed\r\n')
         servidor.conexoes.remove(conexao)
         return sair(conexao)
@@ -226,10 +186,31 @@ def dados_recebidos(conexao, dados):
         elif request.upper() == b'PRIVMSG':
             process_privmsg(conexao, message)
         elif request.upper() == b'JOIN':
-            process_join(conexao, message)
+            if text.startswith(b'#') and validar_nome(text[1:]):
+                if text.upper() not in servidor.canais.keys():
+                    servidor.canais[text.upper()] = {}
+                servidor.canais[text.upper()][conexao.nickid] = conexao 
+                    
+                if text.upper() not in conexao.canais:
+                    conexao.canais.append(text.upper())
+                membros = b''    
+                    
+                for chave in servidor.canais[text.upper()]:
+                    servidor.canais[text.upper()][chave].enviar(b':' + conexao.nickid + b' JOIN :' + text + b'\r\n')
+                    
+                for chave in sorted(servidor.canais[text.upper()].keys()): 
+                    membros += chave + b' '
+                send = b':server 353 ' + conexao.nickid + b' = ' + text + b' :' + membros
+                while len(send) > 510:
+                    restante = send[:510]
+                    conexao.enviar(send + b'\r\n')
+                    send = restante
+                        
+                conexao.enviar(send + b'\r\n' + b':server 366 ' + conexao.nickid + b' ' + text + b' :End of /NAMES list.\r\n')
+            else:
+                conexao.enviar(b':server 403 ' + canal + b' :No such channel.\r\n')
 
-        # Passo 7
-        if request.upper() == b'PART':
+        elif request.upper() == b'PART':
             text = text.split(b' ')[0]
             if text.upper() in servidor.canais.keys():
                 if conexao.nickid in servidor.canais[text.upper()].keys():
@@ -245,7 +226,7 @@ def conexao_aceita(conexao):
     conexao.servidor.adicionar_conexao(conexao)
     conexao.registrar_recebedor(dados_recebidos)
 
-
+    
 servidor = Servidor(6667)
 servidor.registrar_monitor_de_conexoes_aceitas(conexao_aceita)
 asyncio.get_event_loop().run_forever()
